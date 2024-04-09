@@ -3,6 +3,8 @@ from fastapi import FastAPI
 from neomodel import db, adb
 from neomodel import config
 from neo4j import GraphDatabase
+import asyncio
+from concurrent.futures import ThreadPoolExecutor
 
 
 QUERIES = [
@@ -22,7 +24,9 @@ async def startup_event():
     config.DATABASE_URL = "bolt://neo4j:foobarbaz@localhost:7687/locust"
 
     global DRIVER
-    DRIVER = GraphDatabase.driver("bolt://localhost:7687", auth=("neo4j", "foobarbaz"))
+    DRIVER = GraphDatabase.driver(
+        "bolt://localhost:7687", auth=("neo4j", "foobarbaz"), database="locust"
+    )
 
     results, _ = db.cypher_query("MATCH (n) RETURN count(n) > 0")
     if results[0][0] is False:
@@ -50,8 +54,33 @@ async def lifespan(app: FastAPI):
 app = FastAPI(lifespan=lifespan)
 
 
-@app.get("/sync_queries")
-def run_sync_queries():
+async def run_async_query(query):
+    result, _ = await adb.cypher_query(query)
+    return result
+
+
+def run_sync_query(query):
+    result, _ = db.cypher_query(query)
+    return result
+
+
+@app.get("/concurrent_sync_queries")
+def concurrent_sync_queries():
+    max_workers = min(len(QUERIES), 4)
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        results = list(executor.map(run_sync_query, QUERIES))
+    return results
+
+
+@app.get("/concurrent_async_queries")
+async def concurrent_async_queries():
+    tasks = [run_async_query(query) for query in QUERIES]
+    results = await asyncio.gather(*tasks)
+    return results
+
+
+@app.get("/serial_sync_queries")
+def serial_sync_queries():
     results = []
     for query in QUERIES:
         result, _ = db.cypher_query(query)
@@ -59,8 +88,8 @@ def run_sync_queries():
     return results
 
 
-@app.get("/async_queries")
-async def run_async_queries():
+@app.get("/serial_async_queries")
+async def serial_async_queries():
     results = []
     for query in QUERIES:
         result, _ = await adb.cypher_query(query)
@@ -71,10 +100,17 @@ async def run_async_queries():
 @app.get("/neomodel_query")
 def run_neomodel_query():
     records, meta = db.cypher_query("MATCH (n) RETURN count(n)")
-    return records
+    return records[0][0]
 
 
-@app.get("/driver_query")
+@app.get("/driver_execute_query")
 def run_driver_query():
     records, summary, keys = DRIVER.execute_query("MATCH (n) RETURN count(n)")
-    return records
+    return records[0][0]
+
+
+@app.get("/driver_session_query")
+def run_driver_query_session():
+    with DRIVER.session() as session:
+        records = session.run("MATCH (n) RETURN count(n)")
+        return records.single()[0]
